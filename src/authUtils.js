@@ -1,5 +1,5 @@
 // src/authUtils.js
-import { auth, googleProvider } from "./firebaseConfig";
+import { auth, googleProvider } from "./firebase";
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,

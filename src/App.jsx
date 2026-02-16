@@ -2,9 +2,9 @@ import { useState, useEffect } from "react";
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd";
 import { auth, googleProvider, storage } from "./firebase";
 import { signInWithPopup } from "firebase/auth";
-import { ref, uploadBytes, uploadBytesResumable, getDownloadURL } from "firebase/storage";
-import { supabase } from './supabaseClient'; // Import the client you just made
+import { supabase } from './supabaseClient';
 import emailjs from '@emailjs/browser'; 
+
 export default function App() {
   // ===== User/Auth States =====
   const [loggedIn, setLoggedIn] = useState(false);
@@ -34,7 +34,8 @@ export default function App() {
   const [category, setCategory] = useState("Announcement");
   const [priority, setPriority] = useState("normal");
   const [dept, setDept] = useState("All");
-  const [eventDate, setEventDate] = useState(""); // NEW: For Countdown
+  const [eventDate, setEventDate] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
   const [attachment, setAttachment] = useState(null);
   const [editingId, setEditingId] = useState(null);
   const [search, setSearch] = useState("");
@@ -58,7 +59,7 @@ export default function App() {
     return [];
   });
 
-  // ===== Live Clock (Also drives Countdown Refresh) =====
+  // ===== Live Clock =====
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
@@ -67,7 +68,8 @@ export default function App() {
   // ===== Dynamic CAPTCHA Refresh =====
   useEffect(() => {
     setCaptchaValue(Math.random().toString(36).substring(2, 8));
-  }, [showSignup, forgotPassword, username, email, password, confirmPassword, signupRole, signupDept, loginId]);
+    setCaptcha("");
+  }, [showSignup, forgotPassword]);
 
   // ===== Save to localStorage =====
   useEffect(() => {
@@ -95,6 +97,46 @@ export default function App() {
     return `${days}d ${hours}h ${minutes}m ${seconds}s`;
   };
 
+  // ===== File Type Helpers =====
+  // ===== UNIVERSAL FILE HELPERS =====
+  const getFileIcon = (filename) => {
+    if (!filename) return "📎";
+    const ext = filename.split('.').pop().toLowerCase();
+    const icons = {
+      pdf: "📄",
+      doc: "📝", docx: "📝",
+      xls: "📊", xlsx: "📊",
+      ppt: "🎯", pptx: "🎯",
+      zip: "📦", rar: "📦", "7z": "📦",
+      jpg: "🖼️", jpeg: "🖼️", png: "🖼️", gif: "🖼️", webp: "🖼️",
+      mp4: "🎬", mov: "🎬", avi: "🎬",
+      mp3: "🎵", wav: "🎵",
+      txt: "📄", csv: "📊",
+    };
+    return icons[ext] || "📎";
+  };
+
+  const getFileSize = (bytes) => {
+    if (!bytes || bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  const isImageFile = (filename) =>
+  /\.(jpe?g|png|gif|webp|svg|bmp)$/i.test(filename);
+
+const isVideoFile = (filename) =>
+  /\.(mp4|mov|avi|mkv|webm)$/i.test(filename);
+
+const isAudioFile = (filename) =>
+  /\.(mp3|wav|ogg|aac)$/i.test(filename);
+
+const isPreviewableOffice = (filename) =>
+  /\.(pdf|docx?|xlsx?|pptx?)$/i.test(filename);
+
+
   // ===== Permissions Check =====
   const hasPostAuthority = ["admin", "staff", "hod"].includes(role);
 
@@ -115,6 +157,13 @@ export default function App() {
       audio.play();
     } catch (e) { }
     setTimeout(() => setPopupMsg(null), 5000); 
+  };
+
+  const speakNotice = (title, desc) => {
+    window.speechSynthesis.cancel(); 
+    const msg = new SpeechSynthesisUtterance(`${title}. ${desc}`);
+    msg.rate = 1.0; 
+    window.speechSynthesis.speak(msg);
   };
 
   const markAsRead = (noticeId) => {
@@ -187,7 +236,9 @@ export default function App() {
     const newUser = { username, password, email, role: signupRole, dept: signupDept, readNotices: [] };
     setUsers([...users, newUser]);
     alert("Email verified! Account created successfully.");
-    setVerificationStep(""); setShowSignup(false); resetForms();
+    setVerificationStep("");
+    setShowSignup(false);
+    resetForms();
   };
 
   const requestResetOtp = () => {
@@ -222,12 +273,21 @@ export default function App() {
 
     setUsers(users.map(u => u.email === email ? { ...u, password: password } : u));
     alert("Password updated successfully! You can now login.");
-    setVerificationStep(""); setForgotPassword(false); resetForms();
+    setVerificationStep("");
+    setForgotPassword(false);
+    resetForms();
   };
 
   const resetForms = () => {
-    setUsername(""); setLoginId(""); setPassword(""); setConfirmPassword(""); 
-    setEmail(""); setOtpInput(""); setCaptcha(""); setEventDate("");
+    setUsername("");
+    setLoginId("");
+    setPassword("");
+    setConfirmPassword(""); 
+    setEmail("");
+    setOtpInput("");
+    setCaptcha("");
+    setEventDate("");
+    setExpiryDate("");
   };
 
   const handleGoogleLogin = async () => {
@@ -236,7 +296,19 @@ export default function App() {
       const gUser = result.user;
       let localUser = users.find((u) => u.email === gUser.email);
       if (!localUser) {
-        localUser = { username: gUser.displayName.split(" ")[0], email: gUser.email, password: "", role: "student", dept: "All", readNotices: [], google: true };
+        let safeName = gUser.displayName ? gUser.displayName.split(" ")[0] : "User";
+        if (users.some(u => u.username === safeName)) {
+          safeName = safeName + "_" + Date.now().toString().slice(-4);
+        }
+        localUser = { 
+          username: safeName,
+          email: gUser.email,
+          password: "",
+          role: "student",
+          dept: "All",
+          readNotices: [],
+          google: true
+        };
         setUsers([...users, localUser]);
       }
       setUsername(localUser.username);
@@ -247,117 +319,191 @@ export default function App() {
     }
   };
 
-const addNotice = async () => {
-  if (!title || !desc) return alert("Fill all fields");
+  // ===== FIX 1: REMOVE AUTO-URGENT LOGIC =====
+  const addNotice = async () => {
+    if (!title || !desc) return alert("Fill all fields");
 
-  const isEditing = editingId !== null;
-  const tempId = isEditing ? editingId : Date.now();
-  const currentFile = attachment;
-  const isNewFile = currentFile instanceof File;
+    const MAX_FILE_SIZE_MB = 100; // Increased size limit
 
-  const existingNotice = notices.find(n => n.id === editingId);
+const blockedExtensions = [
+  '.exe', '.bat', '.cmd', '.sh',
+  '.js', '.jsx', '.ts', '.tsx',
+  '.php', '.py', '.html', '.css',
+  '.com', '.msi'
+];
 
-  const newNoticeData = {
-    id: tempId,
-    title,
-    desc,
-    category,
-    priority,
-    dept,
-    eventDate: category === "Event" ? eventDate : null,
-    // Ensure this specific line is correct in your object:
-    attachment: isNewFile ? null : (existingNotice?.attachment || null),  
-    isUploadingFile: isNewFile,
-    pinned: existingNotice ? existingNotice.pinned : false, // Maintain pin status
-    date: isEditing ? existingNotice.date : new Date().toLocaleString(),
-    likes: existingNotice ? existingNotice.likes : [],
-    bookmarks: existingNotice ? existingNotice.bookmarks : []
-  };
 
-  setNotices((prev) => 
-    isEditing 
-      ? prev.map((n) => (n.id === editingId ? { ...n, ...newNoticeData } : n)) 
-      : [newNoticeData, ...prev]
-  );
+    if (attachment && attachment.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+      return alert(`Attachment too large (max ${MAX_FILE_SIZE_MB} MB). Current size: ${getFileSize(attachment.size)}`);
+    }
 
-  if (!isEditing) triggerPopup(newNoticeData);
-  
-  // --- CORRECTED RESET LOGIC ---
-  setTitle("");
-  setDesc("");
-  setAttachment(null);
-  setEditingId(null);  // <--- ADD THIS: Resets from "Edit Mode" to "Post Mode"
-  setEventDate("");
-  // -----------------------------
+    if (attachment && blockedExtensions.some(ext => attachment.name.toLowerCase().endsWith(ext))) {
+      return alert("⚠️ This file type is not allowed for security reasons.");
+    }
 
-  if (isNewFile) {
-    try {
-      const fileExt = currentFile.name.split('.').pop();
-      const fileName = `${tempId}.${fileExt}`;
-      const { error } = await supabase.storage.from('attachments').upload(fileName, currentFile, { upsert: true });
-      if (error) throw error;
-      const { data } = supabase.storage.from('attachments').getPublicUrl(fileName);
-      setNotices(prev => prev.map(n => n.id === tempId ? { ...n, attachment: data.publicUrl, isUploadingFile: false } : n));
-    } catch (err) {
-      setNotices(prev => prev.map(n => n.id === tempId ? { ...n, isUploadingFile: false } : n));
-    }
-  }
-};
-const deleteNotice = async (id) => {
-  if (window.confirm("Are you sure you want to delete this notice?")) {
-    const noticeToDelete = notices.find(n => n.id === id);
-    
-    // Cleanup: Delete from Supabase storage if it has a file
-    if (noticeToDelete?.attachment) {
-      const fileName = noticeToDelete.attachment.split('/').pop();
-      await supabase.storage.from('attachments').remove([fileName]);
-    }
+    // FIX: Use selected priority, NOT auto-urgent based on keywords
+    const finalPriority = priority;
 
-    setNotices((prev) => prev.filter((n) => n.id !== id));
-  }
-};
+    const isEditing = editingId !== null;
+    const tempId = isEditing ? editingId : Date.now();
+    const isNewFile = !!attachment;
+    const existingNotice = notices.find(n => n.id === editingId);
+
+    const newNoticeData = {
+      id: tempId,
+      title,
+      desc,
+      category,
+      priority: finalPriority, // Use selected priority
+      dept,
+      eventDate: category === "Event" ? eventDate : null,
+      expiryDate: expiryDate || null,
+      attachment: isNewFile ? null : (existingNotice?.attachment || null),
+      attachmentName: isNewFile ? attachment.name : (existingNotice?.attachmentName || null),
+      attachmentSize: isNewFile ? attachment.size : (existingNotice?.attachmentSize || null),
+      isUploadingFile: isNewFile,
+      pinned: existingNotice ? existingNotice.pinned : false,
+      date: isEditing ? existingNotice.date : new Date().toISOString(),
+      likes: existingNotice ? (existingNotice.likes || []) : [],
+      bookmarks: existingNotice ? (existingNotice.bookmarks || []) : []
+    };
+
+    setNotices((prev) => 
+      isEditing 
+        ? prev.map((n) => (n.id === editingId ? newNoticeData : n)) 
+        : [newNoticeData, ...prev]
+    );
+
+    if (!isEditing) triggerPopup(newNoticeData);
+
+    setTitle("");
+    setDesc("");
+    setAttachment(null);
+    setEditingId(null); 
+    setEventDate("");
+    setExpiryDate("");
+    setCategory("Announcement");
+    setPriority("normal");
+    setDept("All");
+
+    // ===== FIX 2: IMPROVED FILE UPLOAD WITH UNIQUE FILENAME =====
+    if (isNewFile && attachment) {
+      try {
+        const fileName = `${tempId}_${attachment.name}`;
+        const { error } = await supabase.storage.from('attachments').upload(fileName, attachment, { upsert: true });
+        if (error) throw error;
+        const { data } = supabase.storage.from('attachments').getPublicUrl(fileName);
+        setNotices(prev => prev.map(n => n.id === tempId ? {
+          ...n,
+          attachment: data.publicUrl,
+          attachmentName: attachment.name,
+          attachmentSize: attachment.size,
+          isUploadingFile: false,
+        } : n));
+      } catch (err) {
+        console.error("File upload error:", err);
+        setNotices(prev => prev.map(n => n.id === tempId ? { ...n, isUploadingFile: false } : n));
+        alert("Upload failed: " + err.message);
+      }
+    }
+  };
+
+  const deleteNotice = async (id) => {
+    if (window.confirm("Are you sure you want to delete this notice?")) {
+      const noticeToDelete = notices.find(n => n.id === id);
+      
+      if (noticeToDelete?.attachment) {
+        const fileName = noticeToDelete.attachment.split('/').pop();
+        try {
+          await supabase.storage.from('attachments').remove([fileName]);
+        } catch (err) {
+          console.warn("File delete failed:", err);
+        }
+      }
+
+      setNotices((prev) => prev.filter((n) => n.id !== id));
+      
+      if (editingId === id) {
+        setEditingId(null);
+        resetForms();
+      }
+    }
+  };
+
+  const toggleLike = (id) => {
+    if (!username) return;
+    setNotices(prev => prev.map(n => {
+      if (n.id === id) {
+        const likes = n.likes || [];
+        const newLikes = likes.includes(username) 
+          ? likes.filter(u => u !== username) 
+          : [...likes, username];
+        return { ...n, likes: newLikes };
+      }
+      return n;
+    }));
+  };
+
   const toggleBookmark = (id) => {
+    if (!username) return;
     setNotices(notices.map(n => {
       if (n.id === id) {
-        const newBookmarks = n.bookmarks?.includes(username) ? n.bookmarks.filter(u => u !== username) : [...(n.bookmarks || []), username];            
+        const newBookmarks = n.bookmarks?.includes(username)
+          ? n.bookmarks.filter(u => u !== username)
+          : [...(n.bookmarks || []), username];            
         return { ...n, bookmarks: newBookmarks };
       }
       return n;
     }));
   };
-  const togglePin = (id) => {
-  setNotices(prev => prev.map(n => 
-    n.id === id ? { ...n, pinned: !n.pinned } : n
-  ));
-};
-  const onDragEnd = (result) => {
-    if (!result.destination || !hasPostAuthority) return; 
-    const items = Array.from(notices);
-    const [reordered] = items.splice(result.source.index, 1);
-    items.splice(result.destination.index, 0, reordered);
-    setNotices(items);
+
+  const togglePin = (id) => {
+    setNotices(prev => prev.map(n => 
+      n.id === id ? { ...n, pinned: !n.pinned } : n
+    ));
   };
 
-  // 1. Define the map FIRST
-const priorityMap = { urgent: 2, important: 1, normal: 0 };
+  const onDragEnd = (result) => {
+    if (!result.destination || !hasPostAuthority) return;
+    
+    if (search !== "" || filterCategory !== "All" || showSavedOnly) {
+      alert("Reordering is only allowed in 'All Categories' view with no search active.");
+      return;
+    }
 
-// 2. Use it in the sort logic
-const sortedNotices = [...notices]
-  .filter((n) => (filterCategory === "All" || n.category === filterCategory))
-  .filter((n) => (search === "" || n.title.toLowerCase().includes(search.toLowerCase())))
-  .filter((n) => (showSavedOnly ? n.bookmarks?.includes(username) : true)) 
-  .sort((a, b) => {
-    // Priority 1: Pinned notices always stay at the top
-    if (b.pinned !== a.pinned) return b.pinned ? 1 : -1;
+    const items = Array.from(notices);
+    const [reorderedItem] = items.splice(result.source.index, 1);
+    items.splice(result.destination.index, 0, reorderedItem);
+    
+    const reorderedWithOrder = items.map((item, index) => ({
+      ...item,
+      order: items.length - index
+    }));
+    setNotices(reorderedWithOrder);
+  };
 
-    // Priority 2: High priority (Urgent > Important > Normal)
-    if (priorityMap[b.priority] !== priorityMap[a.priority]) {
-      return priorityMap[b.priority] - priorityMap[a.priority];
-    }
+  const priorityMap = { urgent: 2, important: 1, normal: 0 };
 
-    // Priority 3: Newest notices first (Date)
-    return new Date(b.date) - new Date(a.date);
-  });
+  const getSmartTag = (desc) => {
+    const d = desc.toLowerCase();
+    if (d.includes("exam") || d.includes("test")) return "📝 EXAM ALERT";
+    if (d.includes("placement") || d.includes("job")) return "💼 PLACEMENT";
+    if (d.includes("holiday") || d.includes("leave")) return "🎉 HOLIDAY";
+    if (d.includes("deadline") || d.includes("last date")) return "⏰ DEADLINE";
+    return null;
+  };
+
+  const sortedNotices = [...notices]
+    .filter(n => !n.expiryDate || new Date(n.expiryDate) > time) 
+    .filter(n => role === "admin" || n.dept === "All" || n.dept === currentUserData.dept)
+    .filter((n) => (filterCategory === "All" || n.category === filterCategory))
+    .filter((n) => (search === "" || n.title.toLowerCase().includes(search.toLowerCase())))
+    .filter((n) => (showSavedOnly ? n.bookmarks?.includes(username) : true)) 
+    .sort((a, b) => {
+      if (b.pinned !== a.pinned) return b.pinned ? 1 : -1;
+      if (priorityMap[b.priority] !== priorityMap[a.priority]) return priorityMap[b.priority] - priorityMap[a.priority];
+      return (b.order || 0) - (a.order || 0);
+    });
 
   // ===== UI RENDERS: LOGIN/AUTH =====
   if (!loggedIn) {
@@ -504,7 +650,7 @@ const sortedNotices = [...notices]
                          <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded">{n.category}</span>
                        </div>
                        <div className="text-sm font-semibold mb-1 leading-tight">{n.title}</div>
-                       <div className="text-xs text-gray-500">{n.date}</div>
+                       <div className="text-xs text-gray-500">{new Date(n.date).toLocaleString()}</div>
                      </div>
                    ))
                  )}
@@ -516,7 +662,18 @@ const sortedNotices = [...notices]
         <span className="text-gray-300 font-medium hidden md:block">
           Welcome, <span className="text-white font-bold">{username}</span> ({role.toUpperCase()})
         </span>
-        <button onClick={() => { setLoggedIn(false); setRole(""); setUsername(""); setLoginId(""); setShowNotifications(false); }} className="bg-red-600 px-4 py-2 rounded shadow hover:bg-red-700 transition font-bold">Logout</button>
+        <button onClick={() => { 
+          setLoggedIn(false);
+          setRole("");
+          setUsername("");
+          setLoginId("");
+          setShowNotifications(false);
+          setEditingId(null);
+          setAttachment(null);
+          setSearch("");
+          setFilterCategory("All");
+          setShowSavedOnly(false);
+        }} className="bg-red-600 px-4 py-2 rounded shadow hover:bg-red-700 transition font-bold">Logout</button>
       </div>
       
       <div className="text-center mb-8 bg-gray-900 py-6 rounded-2xl border border-gray-800 shadow-xl relative overflow-hidden mt-12 md:mt-0">
@@ -533,45 +690,80 @@ const sortedNotices = [...notices]
       {hasPostAuthority && (
         <div className="bg-gray-900 p-6 rounded-2xl mb-6 shadow-lg border border-gray-800">
           <h2 className="text-xl font-bold mb-4 border-b border-gray-700 pb-2">Institution Control Panel</h2>
-          <input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full p-3 mb-3 rounded bg-gray-800 border border-gray-700" />
-          <textarea placeholder="Description" value={desc} onChange={(e) => setDesc(e.target.value)} className="w-full p-3 mb-3 rounded bg-gray-800 border border-gray-700 h-24" />
+          <input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full p-3 mb-3 rounded bg-gray-800 border border-gray-700 text-white" />
+          <textarea placeholder="Description" value={desc} onChange={(e) => setDesc(e.target.value)} className="w-full p-3 mb-3 rounded bg-gray-800 border border-gray-700 h-24 text-white" />
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-3">
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700">
-              <option>Announcement</option><option>Event</option><option>Exam</option>
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700 text-white">
+              <option value="Announcement">Announcement</option><option value="Event">Event</option><option value="Exam">Exam</option>
             </select>
-            <select value={priority} onChange={(e) => setPriority(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700">
+            <select value={priority} onChange={(e) => setPriority(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700 text-white">
               <option value="normal">Normal</option><option value="important">Important</option><option value="urgent">Urgent</option>
             </select>
-            <select value={dept} onChange={(e) => setDept(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700">
-              <option>All</option><option>CSE</option><option>MECH</option><option>CIVIL</option><option>EEE</option><option>ECE</option>
+            <select value={dept} onChange={(e) => setDept(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700 text-white">
+              <option value="All">All</option><option value="CSE">CSE</option><option value="MECH">MECH</option><option value="CIVIL">CIVIL</option><option value="EEE">EEE</option><option value="ECE">ECE</option>
             </select>
           </div>
 
-          {/* NEW: Event Date Input Field */}
           {category === "Event" && (
             <div className="mb-4 animate-fadeIn">
               <label className="block text-sm font-medium mb-1 text-blue-400">Event Countdown Date & Time</label>
               <input type="datetime-local" value={eventDate} onChange={(e) => setEventDate(e.target.value)} className="w-full p-3 rounded bg-gray-800 border border-blue-500/50 text-white focus:outline-none focus:border-blue-500 transition" />
             </div>
           )}
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium mb-1 text-red-400">Auto Archive Date (Optional)</label>
+            <input 
+              type="datetime-local" 
+              value={expiryDate} 
+              onChange={(e) => setExpiryDate(e.target.value)} 
+              className="w-full p-3 rounded bg-gray-800 border border-red-500/40 text-white"
+            />
+          </div>
           
           <div className="mb-4">
-            <label className="block text-sm font-medium mb-1 text-gray-300">Attach Document/Image</label>
-            <input id="file-upload" type="file" onChange={(e) => setAttachment(e.target.files[0])} className="w-full text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer" />
+            <label className="block text-sm font-medium mb-1 text-gray-300">📎 Attach Any File</label>
+            <div className="text-xs text-gray-400 mb-2">Supports: PDF, Word, Excel, PowerPoint, Images, Videos, Archives, Text, etc. (Max 25 MB)</div>
+            <input
+  type="file"
+  accept="*/*"
+  multiple
+  onChange={(e) => {
+    if (e.target.files && e.target.files.length > 0) {
+      console.log("Selected file:", e.target.files[0]);
+      setAttachment(e.target.files[0]);
+    }
+  }}
+  className="w-full text-sm text-gray-300
+             file:mr-4 file:py-2 file:px-4
+             file:rounded file:border-0
+             file:text-sm file:font-semibold
+             file:bg-blue-600 file:text-white
+             hover:file:bg-blue-700 cursor-pointer"
+/>
+
+            {attachment && (
+              <div className="mt-3 p-3 bg-gray-800 border border-gray-700 rounded flex items-center justify-between">
+                <span className="text-sm text-white">
+                  {getFileIcon(attachment.name)} {attachment.name} ({getFileSize(attachment.size)})
+                </span>
+                <button onClick={() => setAttachment(null)} className="text-red-500 hover:text-red-400 font-bold">✕</button>
+              </div>
+            )}
           </div>
 
-          <button onClick={addNotice} className="w-full py-3 rounded-lg font-bold transition bg-green-600 hover:bg-green-700">
+          <button onClick={addNotice} className="w-full py-3 rounded-lg font-bold transition bg-green-600 hover:bg-green-700 text-white">
             {editingId ? "✏️ Update Notice" : "➕ Post Notice"}
           </button>
         </div>
       )}
 
       <div className="flex mb-6 gap-3 flex-wrap bg-gray-900 p-4 rounded-xl border border-gray-800">
-        <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700">
+        <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="p-3 rounded bg-gray-800 border border-gray-700 text-white">
           <option value="All">All Categories</option><option value="Announcement">Announcement</option><option value="Event">Event</option><option value="Exam">Exam</option>
         </select>
-        <input placeholder="🔍 Search Notice by title..." className="flex-1 p-3 rounded bg-gray-800 border border-gray-700" onChange={(e) => setSearch(e.target.value)} />
+        <input placeholder="🔍 Search Notice by title..." className="flex-1 p-3 rounded bg-gray-800 border border-gray-700 text-white" onChange={(e) => setSearch(e.target.value)} />
         <button onClick={() => setShowSavedOnly(!showSavedOnly)} className={`px-4 py-2 rounded font-bold transition border ${showSavedOnly ? 'bg-yellow-500 text-black border-yellow-500' : 'bg-gray-800 text-gray-400 border-gray-700 hover:text-white hover:border-gray-500'}`}>
           {showSavedOnly ? "📂 Viewing Saved" : "🔖 Show Saved"}
         </button>
@@ -589,47 +781,44 @@ const sortedNotices = [...notices]
                     {(provided) => (
                       <div ref={provided.innerRef} {...provided.draggableProps} {...provided.dragHandleProps} className={`bg-gray-900 p-6 rounded-xl flex flex-col shadow-lg relative transition ${n.pinned ? "border-2 border-yellow-500 shadow-yellow-500/20" : "border border-gray-800"}`}>
                         {hasPostAuthority && (
-  <div className="absolute top-2 right-2 flex gap-2 z-10">
-    {/* PIN */}
-    <button 
-      onClick={() => togglePin(n.id)} 
-      className={`p-2 rounded-full transition ${n.pinned ? "bg-yellow-500 text-black shadow-lg" : "bg-gray-800 text-gray-400"}`}
-    >
-      📌
-    </button>
+                          <div className="absolute top-2 right-2 flex gap-2 z-10">
+                            <button 
+                              onClick={() => togglePin(n.id)} 
+                              className={`p-2 rounded-full transition ${n.pinned ? "bg-yellow-500 text-black shadow-lg" : "bg-gray-800 text-gray-400"}`}
+                            >
+                              📌
+                            </button>
 
-    {/* EDIT */}
-    <button 
-      onClick={() => { 
-        setEditingId(n.id); 
-        setTitle(n.title); 
-        setDesc(n.desc); 
-        setCategory(n.category); 
-        setPriority(n.priority); 
-        setDept(n.dept); 
-        setEventDate(n.eventDate || ""); 
-      }} 
-      className="bg-gray-800 p-2 rounded-full hover:bg-blue-600 transition"
-    >
-      ✏️
-    </button>
+                            <button 
+                              onClick={() => { 
+                                setEditingId(n.id); 
+                                setTitle(n.title); 
+                                setDesc(n.desc); 
+                                setCategory(n.category); 
+                                setPriority(n.priority); 
+                                setDept(n.dept); 
+                                setEventDate(n.eventDate || ""); 
+                                setExpiryDate(n.expiryDate || "");
+                              }} 
+                              className="bg-gray-800 p-2 rounded-full hover:bg-blue-600 transition"
+                            >
+                              ✏️
+                            </button>
 
-    {/* DELETE */}
-    <button 
-      onClick={() => deleteNotice(n.id)} 
-      className="bg-gray-800 p-2 rounded-full hover:bg-red-600 transition text-red-500 hover:text-white"
-    >
-      🗑️
-    </button>
-  </div>
-)}
+                            <button 
+                              onClick={() => deleteNotice(n.id)} 
+                              className="bg-gray-800 p-2 rounded-full hover:bg-red-600 transition text-red-500 hover:text-white"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        )}
                         
                         <div className="flex gap-2 mb-3 mt-6">
                           <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase ${n.priority === 'urgent' ? 'bg-red-600/20 text-red-500' : n.priority === 'important' ? 'bg-yellow-600/20 text-yellow-500' : 'bg-gray-700 text-gray-300'}`}>{n.priority}</span>
                           <span className="bg-blue-600/20 text-blue-400 px-3 py-1 rounded-full text-xs font-bold">{n.dept}</span>
                         </div>
 
-                        {/* EVENT COUNTDOWN DISPLAY SECTION */}
                         {n.category === "Event" && n.eventDate && (
                           <div className="mb-4 p-3 bg-blue-600/10 border border-blue-500/30 rounded-lg text-center shadow-inner">
                             <div className="text-[10px] uppercase tracking-widest text-blue-400 font-extrabold mb-1">Happening In</div>
@@ -643,36 +832,82 @@ const sortedNotices = [...notices]
                         <p className="text-sm text-gray-400 mb-4 font-medium">{n.category}</p>
                         <p className="text-gray-300 mb-6 flex-grow whitespace-pre-wrap">{n.desc}</p>
                         
-                        {/* Inside your notice card map function */}
-{(n.attachment || n.isUploadingFile) && (
-  <div className="mt-4 flex gap-2">
-    {n.isUploadingFile ? (
-      <div className="w-full bg-blue-900/20 py-2 rounded text-center animate-pulse text-xs text-blue-400">
-        ⚡ Delivering to CDN...
-      </div>
-    ) : (
-      <>
-        <a 
-          href={n.attachment?.match(/\.(docx|doc|xlsx|xls|pptx|ppt)$/i) 
-            ? `https://docs.google.com/viewer?url=${encodeURIComponent(n.attachment)}&embedded=true` 
-            : n.attachment} 
-          target="_blank" 
-          rel="noopener noreferrer" 
-          className="flex-1 bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-center text-sm shadow-lg"
-        >
-          👁️ Online View
-        </a>
-        <a 
-          href={n.attachment} 
-          download 
-          className="bg-gray-800 px-3 py-2 rounded border border-gray-600 text-white"
-        >
-          ⬇️
-        </a>
-      </>
-    )}
-  </div>
+                        {/* ===== ENHANCED FILE VIEWER ===== */}
+                        {(n.attachment || n.isUploadingFile) && (
+                          <div className="mt-4 flex flex-col gap-2">
+                            {n.isUploadingFile ? (
+                              <div className="w-full bg-blue-900/20 py-2 rounded text-center animate-pulse text-xs text-blue-400">
+                                ⚡ Uploading: {n.attachmentName} ({getFileSize(n.attachmentSize)})...
+                              </div>
+                            ) : n.attachment && (
+                              <>
+                                {/* Image Preview */}
+                                {isImageFile(n.attachmentName) && (
+                                  <img
+                                    src={n.attachment}
+                                    alt="attachment preview"
+                                    className="w-full max-h-40 object-contain border border-gray-600 rounded"
+                                    style={{ background: '#222' }}
+                                  />
+                                )}
+                                {/* Video Preview */}
+{isVideoFile(n.attachmentName) && (
+  <video
+    src={n.attachment}
+    controls
+    className="w-full max-h-60 rounded border border-gray-600"
+  />
 )}
+
+{/* Audio Preview */}
+{isAudioFile(n.attachmentName) && (
+  <audio
+    src={n.attachment}
+    controls
+    className="w-full"
+  />
+)}
+
+
+                                {/* File Info */}
+                                <div className="text-xs text-gray-400 p-2 bg-gray-800/50 rounded flex items-center justify-between">
+                                  <span>{getFileIcon(n.attachmentName)} {n.attachmentName} ({getFileSize(n.attachmentSize)})</span>
+                                </div>
+
+                                {/* Viewer/Download Buttons */}
+                                <div className="flex gap-2">
+                                  {isPreviewableOffice(n.attachmentName) ? (
+                                    <a
+                                      href={`https://docs.google.com/viewer?url=${encodeURIComponent(n.attachment)}&embedded=true`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="flex-1 bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-center text-sm shadow-lg transition"
+                                    >👁️ Preview</a>
+                                  ) : isImageFile(n.attachmentName) ? (
+                                    <a
+                                      href={n.attachment}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="flex-1 bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-center text-sm shadow-lg transition"
+                                    >👁️ View Full</a>
+                                  ) : (
+                                    <a
+                                      href={n.attachment}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="flex-1 bg-blue-600 hover:bg-blue-700 py-2 rounded font-bold text-center text-sm shadow-lg transition"
+                                    >👁️ Open</a>
+                                  )}
+                                  <a
+                                    href={n.attachment}
+                                    download={n.attachmentName}
+                                    className="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded border border-gray-600 text-white font-bold transition"
+                                  >⬇️</a>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        )}
                         
                         <div className="mt-auto border-t border-gray-800 pt-4 flex justify-between items-center">
                           <div className="flex gap-2">
@@ -683,7 +918,7 @@ const sortedNotices = [...notices]
                               {n.bookmarks?.includes(username) ? "🔖 Saved" : "📑 Save"}
                             </button>
                           </div>
-                          <span className="text-xs text-gray-500 text-right pl-2">{n.date}</span>
+                          <span className="text-xs text-gray-500 text-right pl-2">{new Date(n.date).toLocaleString()}</span>
                         </div>
                       </div>
                     )}
@@ -697,4 +932,4 @@ const sortedNotices = [...notices]
       </DragDropContext>
     </div>
   );
-}
+} 
