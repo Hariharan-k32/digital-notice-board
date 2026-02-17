@@ -4,7 +4,7 @@ import { auth, googleProvider, storage } from "./firebase";
 import { signInWithPopup } from "firebase/auth";
 import { supabase } from './supabaseClient';
 import emailjs from '@emailjs/browser'; 
-
+import toast, { Toaster } from "react-hot-toast";
 export default function App() {
   // ===== User/Auth States =====
   const [loggedIn, setLoggedIn] = useState(false);
@@ -53,17 +53,33 @@ export default function App() {
     return saved ? JSON.parse(saved) : [];
   });
 
-  const [notices, setNotices] = useState(() => {
-    const saved = localStorage.getItem("notices");
-    if (saved) return JSON.parse(saved);
-    return [];
-  });
+  const [notices, setNotices] = useState([]);
 
   // ===== Live Clock =====
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+  // ===== LOAD NOTICES WHEN LOGGED IN =====
+  useEffect(() => {
+  if (!loggedIn) return;
+
+  // ✅ Load notices immediately after login
+  loadNotices();
+
+  // ✅ Realtime updates
+  const channel = supabase
+    .channel("campus-notice-live")
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "notices" },
+      () => loadNotices()
+    )
+    .subscribe();
+
+  return () => supabase.removeChannel(channel);
+}, [loggedIn]);
+
 
   // ===== Dynamic CAPTCHA Refresh =====
   useEffect(() => {
@@ -75,10 +91,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("users", JSON.stringify(users));
   }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem("notices", JSON.stringify(notices));
-  }, [notices]);
 
   // ===== Countdown Logic Function =====
   const getCountdown = (targetDate) => {
@@ -96,8 +108,41 @@ export default function App() {
 
     return `${days}d ${hours}h ${minutes}m ${seconds}s`;
   };
+const getViewsCount = async (noticeId) => {
+  const { count, error } = await supabase
+    .from("notice_views")
+    .select("*", { count: "exact", head: true })
+    .eq("notice_id", noticeId);
 
-  // ===== File Type Helpers =====
+  if (error) {
+    console.error("View count error:", error);
+    return 0;
+  }
+
+  return count || 0;
+};
+
+const loadNotices = async () => {
+  const { data, error } = await supabase
+    .from("notices")
+    .select("*")
+    .order("date", { ascending: false });
+
+  if (error) {
+    console.error("Supabase load error:", error);
+    return;
+  }
+
+  const updated = await Promise.all(
+    data.map(async (n) => {
+      const views = await getViewsCount(n.id);
+      return { ...n, views };
+    })
+  );
+
+  setNotices(updated);
+};
+
   // ===== UNIVERSAL FILE HELPERS =====
   const getFileIcon = (filename) => {
     if (!filename) return "📎";
@@ -148,6 +193,28 @@ const isPreviewableOffice = (filename) =>
     (n.dept === "All" || n.dept === currentUserData.dept) && 
     !readNotices.includes(n.id)
   );
+  // ===== NOTICE VIEW ANALYTICS =====
+const trackNoticeView = async (notice) => {
+  await supabase.from("notice_views").upsert([
+    {
+      notice_id: notice.id,
+      username: username,
+      dept: currentUserData.dept,
+    },
+  ]);
+
+  // ✅ Immediately refresh views count
+  const newCount = await getViewsCount(notice.id);
+
+  setNotices((prev) =>
+    prev.map((n) =>
+      n.id === notice.id ? { ...n, views: newCount } : n
+    )
+  );
+};
+
+
+
 
   const triggerPopup = (notice) => {
     setPopupMsg(notice);
@@ -318,150 +385,277 @@ const isPreviewableOffice = (filename) =>
       alert("Google Sign-In Failed");
     }
   };
+// ===== FINAL FIXED addNotice() =====
+const addNotice = async () => {
+  if (!title || !desc) return alert("Fill all fields");
 
-  // ===== FIX 1: REMOVE AUTO-URGENT LOGIC =====
-  const addNotice = async () => {
-    if (!title || !desc) return alert("Fill all fields");
+  const MAX_FILE_SIZE_MB = 100;
 
-    const MAX_FILE_SIZE_MB = 100; // Increased size limit
+  const blockedExtensions = [
+    ".exe", ".bat", ".cmd", ".sh",
+    ".js", ".jsx", ".ts", ".tsx",
+    ".php", ".py", ".html", ".css",
+    ".com", ".msi"
+  ];
 
-const blockedExtensions = [
-  '.exe', '.bat', '.cmd', '.sh',
-  '.js', '.jsx', '.ts', '.tsx',
-  '.php', '.py', '.html', '.css',
-  '.com', '.msi'
-];
+  // ✅ File size check
+  if (attachment && attachment.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+    return alert(
+      `Attachment too large (max ${MAX_FILE_SIZE_MB} MB). Current size: ${getFileSize(
+        attachment.size
+      )}`
+    );
+  }
 
+  // ✅ File extension block check
+  if (
+    attachment &&
+    blockedExtensions.some((ext) =>
+      attachment.name.toLowerCase().endsWith(ext)
+    )
+  ) {
+    return alert("⚠️ This file type is not allowed for security reasons.");
+  }
 
-    if (attachment && attachment.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
-      return alert(`Attachment too large (max ${MAX_FILE_SIZE_MB} MB). Current size: ${getFileSize(attachment.size)}`);
-    }
+  const finalPriority = priority;
+  const isEditing = editingId !== null;
 
-    if (attachment && blockedExtensions.some(ext => attachment.name.toLowerCase().endsWith(ext))) {
-      return alert("⚠️ This file type is not allowed for security reasons.");
-    }
+  const existingNotice = notices.find((n) => n.id === editingId);
 
-    // FIX: Use selected priority, NOT auto-urgent based on keywords
-    const finalPriority = priority;
+  const isNewFile = !!attachment;
 
-    const isEditing = editingId !== null;
-    const tempId = isEditing ? editingId : Date.now();
-    const isNewFile = !!attachment;
-    const existingNotice = notices.find(n => n.id === editingId);
+  // ✅ Notice Data Object
+  const newNoticeData = {
+    title,
+    description: desc,
+    category,
+    priority: finalPriority,
+    dept,
 
-    const newNoticeData = {
-      id: tempId,
-      title,
-      desc,
-      category,
-      priority: finalPriority, // Use selected priority
-      dept,
-      eventDate: category === "Event" ? eventDate : null,
-      expiryDate: expiryDate || null,
-      attachment: isNewFile ? null : (existingNotice?.attachment || null),
-      attachmentName: isNewFile ? attachment.name : (existingNotice?.attachmentName || null),
-      attachmentSize: isNewFile ? attachment.size : (existingNotice?.attachmentSize || null),
-      isUploadingFile: isNewFile,
-      pinned: existingNotice ? existingNotice.pinned : false,
-      date: isEditing ? existingNotice.date : new Date().toISOString(),
-      likes: existingNotice ? (existingNotice.likes || []) : [],
-      bookmarks: existingNotice ? (existingNotice.bookmarks || []) : []
-    };
+    eventDate: category === "Event" ? eventDate : null,
+    expiryDate: expiryDate || null,
 
-    setNotices((prev) => 
-      isEditing 
-        ? prev.map((n) => (n.id === editingId ? newNoticeData : n)) 
-        : [newNoticeData, ...prev]
-    );
+    pinned: existingNotice ? existingNotice.pinned : false,
 
-    if (!isEditing) triggerPopup(newNoticeData);
+    likes: existingNotice ? existingNotice.likes || [] : [],
+    bookmarks: existingNotice ? existingNotice.bookmarks || [] : [],
 
-    setTitle("");
-    setDesc("");
-    setAttachment(null);
-    setEditingId(null); 
-    setEventDate("");
-    setExpiryDate("");
-    setCategory("Announcement");
-    setPriority("normal");
-    setDept("All");
+    date: isEditing
+      ? existingNotice?.date
+      : new Date().toISOString(),
 
-    // ===== FIX 2: IMPROVED FILE UPLOAD WITH UNIQUE FILENAME =====
-    if (isNewFile && attachment) {
-      try {
-        const fileName = `${tempId}_${attachment.name}`;
-        const { error } = await supabase.storage.from('attachments').upload(fileName, attachment, { upsert: true });
-        if (error) throw error;
-        const { data } = supabase.storage.from('attachments').getPublicUrl(fileName);
-        setNotices(prev => prev.map(n => n.id === tempId ? {
-          ...n,
-          attachment: data.publicUrl,
-          attachmentName: attachment.name,
-          attachmentSize: attachment.size,
-          isUploadingFile: false,
-        } : n));
-      } catch (err) {
-        console.error("File upload error:", err);
-        setNotices(prev => prev.map(n => n.id === tempId ? { ...n, isUploadingFile: false } : n));
-        alert("Upload failed: " + err.message);
-      }
-    }
-  };
+    attachment: isNewFile
+      ? null
+      : existingNotice?.attachment || null,
+
+    attachmentName: isNewFile
+      ? attachment?.name
+      : existingNotice?.attachmentName || null,
+
+    attachmentSize: isNewFile
+      ? attachment?.size
+      : existingNotice?.attachmentSize || null,
+
+    isUploadingFile: isNewFile,
+  };
+
+  // ==========================================
+  // ✅ INSERT or UPDATE Notice in Supabase
+  // ==========================================
+  let insertedNotice;
+
+  if (isEditing) {
+    // ✅ UPDATE Existing Notice
+    const { data, error } = await supabase
+      .from("notices")
+      .update(newNoticeData)
+      .eq("id", editingId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Update failed:", error);
+      return alert("Update failed!");
+    }
+
+    insertedNotice = data;
+
+    // ✅ Update UI
+    setNotices((prev) =>
+      prev.map((n) =>
+        n.id === editingId ? insertedNotice : n
+      )
+    );
+  } else {
+    // ✅ INSERT New Notice
+    const { data, error } = await supabase
+      .from("notices")
+      .insert([newNoticeData])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Insert failed:", error);
+      return alert("Insert failed!");
+    }
+
+    insertedNotice = data;
+
+    // ✅ Add New Notice to UI
+    setNotices((prev) => [insertedNotice, ...prev]);
+
+    // ✅ Popup only for new notice
+    triggerPopup(insertedNotice);
+  }
+
+  // ==========================================
+  // ✅ Upload Attachment (Only if New File)
+  // ==========================================
+  if (isNewFile && attachment && insertedNotice) {
+    try {
+      const fileName = `${insertedNotice.id}_${attachment.name}`;
+
+      // Upload file
+      const { error: uploadError } = await supabase.storage
+        .from("attachments")
+        .upload(fileName, attachment, { upsert: true });
+
+      if (uploadError) throw uploadError;
+
+      // Get public URL
+      const { data } = supabase.storage
+        .from("attachments")
+        .getPublicUrl(fileName);
+
+      // ✅ Save URL in Supabase Notice Row
+      await supabase
+        .from("notices")
+        .update({
+          attachment: data.publicUrl,
+          attachmentName: attachment.name,
+          attachmentSize: attachment.size,
+          isUploadingFile: false,
+        })
+        .eq("id", insertedNotice.id);
+
+      // ✅ Update UI immediately
+      setNotices((prev) =>
+        prev.map((n) =>
+          n.id === insertedNotice.id
+            ? {
+                ...n,
+                attachment: data.publicUrl,
+                attachmentName: attachment.name,
+                attachmentSize: attachment.size,
+                isUploadingFile: false,
+              }
+            : n
+        )
+      );
+    } catch (err) {
+      console.error("File upload error:", err);
+
+      alert("Upload failed: " + err.message);
+
+      // Stop loader in UI
+      setNotices((prev) =>
+        prev.map((n) =>
+          n.id === insertedNotice.id
+            ? { ...n, isUploadingFile: false }
+            : n
+        )
+      );
+    }
+  }
+
+  // ==========================================
+  // ✅ Reset Form AFTER Everything
+  // ==========================================
+  setTitle("");
+  setDesc("");
+  setAttachment(null);
+  setEditingId(null);
+  setEventDate("");
+  setExpiryDate("");
+  setCategory("Announcement");
+  setPriority("normal");
+  setDept("All");
+};
+
 
   const deleteNotice = async (id) => {
-    if (window.confirm("Are you sure you want to delete this notice?")) {
-      const noticeToDelete = notices.find(n => n.id === id);
-      
-      if (noticeToDelete?.attachment) {
-        const fileName = noticeToDelete.attachment.split('/').pop();
-        try {
-          await supabase.storage.from('attachments').remove([fileName]);
-        } catch (err) {
-          console.warn("File delete failed:", err);
-        }
-      }
+  if (!window.confirm("Delete this notice?")) return;
 
-      setNotices((prev) => prev.filter((n) => n.id !== id));
-      
-      if (editingId === id) {
-        setEditingId(null);
-        resetForms();
-      }
-    }
-  };
+  const { error } = await supabase
+    .from("notices")
+    .delete()
+    .eq("id", id);
 
-  const toggleLike = (id) => {
-    if (!username) return;
-    setNotices(prev => prev.map(n => {
-      if (n.id === id) {
-        const likes = n.likes || [];
-        const newLikes = likes.includes(username) 
-          ? likes.filter(u => u !== username) 
-          : [...likes, username];
-        return { ...n, likes: newLikes };
-      }
-      return n;
-    }));
-  };
+  if (error) {
+    console.error("Delete error:", error);
+  } else {
+    loadNotices();
+  }
+};
 
-  const toggleBookmark = (id) => {
-    if (!username) return;
-    setNotices(notices.map(n => {
-      if (n.id === id) {
-        const newBookmarks = n.bookmarks?.includes(username)
-          ? n.bookmarks.filter(u => u !== username)
-          : [...(n.bookmarks || []), username];            
-        return { ...n, bookmarks: newBookmarks };
-      }
-      return n;
-    }));
-  };
+  const toggleLike = async (id) => {
+  if (!username) return;
 
-  const togglePin = (id) => {
-    setNotices(prev => prev.map(n => 
-      n.id === id ? { ...n, pinned: !n.pinned } : n
-    ));
-  };
+  const notice = notices.find(n => n.id === id);
+  const likes = notice.likes || [];
+
+  const newLikes = likes.includes(username)
+    ? likes.filter(u => u !== username)
+    : [...likes, username];
+
+  setNotices(prev =>
+    prev.map(n => n.id === id ? { ...n, likes: newLikes } : n)
+  );
+
+  await supabase.from("notices")
+    .update({ likes: newLikes })
+    .eq("id", id);
+};
+
+
+  const toggleBookmark = async (id) => {
+  if (!username) return;
+
+  const notice = notices.find(n => n.id === id);
+  const bookmarks = notice.bookmarks || [];
+
+  const newBookmarks = bookmarks.includes(username)
+    ? bookmarks.filter(u => u !== username)
+    : [...bookmarks, username];
+
+  setNotices(prev =>
+    prev.map(n => n.id === id ? { ...n, bookmarks: newBookmarks } : n)
+  );
+
+  await supabase
+    .from("notices")
+    .update({ bookmarks: newBookmarks })
+    .eq("id", id);
+};
+
+
+  const togglePin = async (id) => {
+  const notice = notices.find(n => n.id === id);
+
+  const newPinned = !notice.pinned;
+
+  setNotices(prev =>
+    prev.map(n =>
+      n.id === id ? { ...n, pinned: newPinned } : n
+    )
+  );
+
+  await supabase
+    .from("notices")
+    .update({ pinned: newPinned })
+    .eq("id", id);
+};
+
 
   const onDragEnd = (result) => {
     if (!result.destination || !hasPostAuthority) return;
@@ -480,6 +674,14 @@ const blockedExtensions = [
       order: items.length - index
     }));
     setNotices(reorderedWithOrder);
+    // ✅ Save new drag order in Supabase
+reorderedWithOrder.forEach(async (item) => {
+  await supabase
+    .from("notices")
+    .update({ order: item.order })
+    .eq("id", item.id);
+});
+
   };
 
   const priorityMap = { urgent: 2, important: 1, normal: 0 };
@@ -602,7 +804,11 @@ const blockedExtensions = [
 
   // ===== DASHBOARD UI =====
   return (
-    <div className="min-h-screen bg-black text-white p-6 relative overflow-hidden">
+  <>
+    <Toaster />
+
+    <div className="min-h-screen bg-black text-white p-6 relative overflow-hidden">
+
       
       {/* ===== WHATSAPP-STYLE PUSH NOTIFICATION ===== */}
       <div className={`fixed top-6 right-6 z-[100] transition-all duration-500 ease-in-out transform ${popupMsg ? "translate-x-0 opacity-100" : "translate-x-full opacity-0"}`}>
@@ -615,7 +821,7 @@ const blockedExtensions = [
                 <span className="text-[10px] text-gray-400">Just now</span>
               </div>
               <p className="text-sm font-bold text-white truncate">{popupMsg.title}</p>
-              <p className="text-xs text-gray-300 truncate mt-0.5">{popupMsg.desc}</p>
+              <p className="text-xs text-gray-300 truncate mt-0.5">{popupMsg.description}</p>
             </div>
             <button className="text-gray-500 hover:text-white transition">✕</button>
           </div>
@@ -724,7 +930,7 @@ const blockedExtensions = [
           
           <div className="mb-4">
             <label className="block text-sm font-medium mb-1 text-gray-300">📎 Attach Any File</label>
-            <div className="text-xs text-gray-400 mb-2">Supports: PDF, Word, Excel, PowerPoint, Images, Videos, Archives, Text, etc. (Max 25 MB)</div>
+            <div className="text-xs text-gray-400 mb-2">Supports: PDF, Word, Excel, PowerPoint, Images, Videos, Archives, Text, etc. (Max 100 MB)</div>
             <input
   type="file"
   accept="*/*"
@@ -779,34 +985,55 @@ const blockedExtensions = [
                 sortedNotices.map((n, index) => (
                   <Draggable key={n.id} draggableId={n.id.toString()} index={index} isDragDisabled={!hasPostAuthority}>
                     {(provided) => (
-                      <div ref={provided.innerRef} {...provided.draggableProps} {...provided.dragHandleProps} className={`bg-gray-900 p-6 rounded-xl flex flex-col shadow-lg relative transition ${n.pinned ? "border-2 border-yellow-500 shadow-yellow-500/20" : "border border-gray-800"}`}>
+                      <div
+  ref={provided.innerRef}
+  {...provided.draggableProps}
+  {...provided.dragHandleProps}
+  onClick={() => trackNoticeView(n)}   // ✅ ADD HERE
+  className={`bg-gray-900 p-6 rounded-xl flex flex-col shadow-lg relative transition ${
+    n.pinned
+      ? "border-2 border-yellow-500 shadow-yellow-500/20"
+      : "border border-gray-800"
+  }`}
+>
+
                         {hasPostAuthority && (
                           <div className="absolute top-2 right-2 flex gap-2 z-10">
                             <button 
-                              onClick={() => togglePin(n.id)} 
+  onClick={(e) => {
+    e.stopPropagation();   // ✅ prevents view count
+    togglePin(n.id);
+  }}
+ 
                               className={`p-2 rounded-full transition ${n.pinned ? "bg-yellow-500 text-black shadow-lg" : "bg-gray-800 text-gray-400"}`}
                             >
                               📌
                             </button>
 
                             <button 
-                              onClick={() => { 
-                                setEditingId(n.id); 
-                                setTitle(n.title); 
-                                setDesc(n.desc); 
-                                setCategory(n.category); 
-                                setPriority(n.priority); 
-                                setDept(n.dept); 
-                                setEventDate(n.eventDate || ""); 
-                                setExpiryDate(n.expiryDate || "");
-                              }} 
+  onClick={(e) => {
+    e.stopPropagation();
+    setEditingId(n.id);
+    setTitle(n.title);
+    setDesc(n.description);
+    setCategory(n.category);
+    setPriority(n.priority);
+    setDept(n.dept);
+    setEventDate(n.eventDate || "");
+    setExpiryDate(n.expiryDate || "");
+  }}
+
                               className="bg-gray-800 p-2 rounded-full hover:bg-blue-600 transition"
                             >
                               ✏️
                             </button>
 
                             <button 
-                              onClick={() => deleteNotice(n.id)} 
+  onClick={(e) => {
+    e.stopPropagation();
+    deleteNotice(n.id);
+  }}
+
                               className="bg-gray-800 p-2 rounded-full hover:bg-red-600 transition text-red-500 hover:text-white"
                             >
                               🗑️
@@ -829,8 +1056,12 @@ const blockedExtensions = [
                         )}
 
                         <h2 className="text-2xl font-bold mb-2 break-words text-white">{n.title}</h2>
+                        <p className="text-xs text-gray-400 mb-2">
+  👁 Views: {n.views || 0}
+</p>
+
                         <p className="text-sm text-gray-400 mb-4 font-medium">{n.category}</p>
-                        <p className="text-gray-300 mb-6 flex-grow whitespace-pre-wrap">{n.desc}</p>
+                        <p className="text-gray-300 mb-6 flex-grow whitespace-pre-wrap">{n.description}</p>
                         
                         {/* ===== ENHANCED FILE VIEWER ===== */}
                         {(n.attachment || n.isUploadingFile) && (
@@ -911,12 +1142,34 @@ const blockedExtensions = [
                         
                         <div className="mt-auto border-t border-gray-800 pt-4 flex justify-between items-center">
                           <div className="flex gap-2">
-                            <button onClick={() => toggleLike(n.id)} className={`flex items-center gap-1 px-3 py-1 rounded-full font-medium transition ${n.likes?.includes(username) ? 'bg-red-500/20 text-red-500' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
-                              {n.likes?.includes(username) ? "❤️" : "🤍"} {n.likes?.length || 0}
-                            </button>
-                            <button onClick={() => toggleBookmark(n.id)} className={`flex items-center gap-1 px-3 py-1 rounded-full font-medium transition ${n.bookmarks?.includes(username) ? 'bg-yellow-500/20 text-yellow-500' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
-                              {n.bookmarks?.includes(username) ? "🔖 Saved" : "📑 Save"}
-                            </button>
+                           <button
+  onClick={(e) => {
+    e.stopPropagation(); // ✅ prevents view tracking
+    toggleLike(n.id);
+  }}
+  className={`flex items-center gap-1 px-3 py-1 rounded-full font-medium transition ${
+    n.likes?.includes(username)
+      ? "bg-red-500/20 text-red-500"
+      : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+  }`}
+>
+  {n.likes?.includes(username) ? "❤️" : "🤍"} {n.likes?.length || 0}
+</button>
+
+<button
+  onClick={(e) => {
+    e.stopPropagation(); // ✅ prevents view tracking
+    toggleBookmark(n.id);
+  }}
+  className={`flex items-center gap-1 px-3 py-1 rounded-full font-medium transition ${
+    n.bookmarks?.includes(username)
+      ? "bg-yellow-500/20 text-yellow-500"
+      : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+  }`}
+>
+  {n.bookmarks?.includes(username) ? "🔖 Saved" : "📑 Save"}
+</button>
+
                           </div>
                           <span className="text-xs text-gray-500 text-right pl-2">{new Date(n.date).toLocaleString()}</span>
                         </div>
@@ -930,6 +1183,7 @@ const blockedExtensions = [
           )}
         </Droppable>
       </DragDropContext>
-    </div>
-  );
-} 
+        </div>
+  </>
+);
+}
